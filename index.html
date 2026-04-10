@@ -1,0 +1,989 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Transformer Roofline — A100 SXM</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #f7f7f5; color: #2c2c2a;
+    display: flex; justify-content: center; padding: 2rem 1rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1a1a1a; color: #d3d1c7; }
+    .card { background: #262626 !important; border-color: rgba(255,255,255,0.1) !important; }
+    .eq code { background: rgba(255,255,255,0.08) !important; }
+    .section-title { border-color: rgba(255,255,255,0.1) !important; }
+  }
+  .wrap { max-width: 860px; width: 100%; }
+  h1 { font-size: 26px; font-weight: 500; margin-bottom: 0.5rem; text-align: center; }
+  .section-title {
+    font-size: 20px; font-weight: 600; margin: 2rem 0 1rem;
+    padding-bottom: 6px; border-bottom: 2px solid rgba(0,0,0,0.08);
+  }
+  .section-title:first-of-type { margin-top: 0.5rem; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 1rem; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 1rem; }
+  .grid4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; margin-bottom: 1rem; }
+  .grid5 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap: 10px; margin-bottom: 1rem; }
+  .card {
+    background: #fff; border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 10px; padding: 0.7rem 0.85rem;
+  }
+  .card-label { font-size: 11px; color: #888; margin-bottom: 2px; }
+  .card-value { font-size: 19px; font-weight: 500; }
+  .card-value.mem { color: #A32D2D; }
+  .card-value.comp { color: #1D9E75; }
+  .slider-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+  .slider-row input[type=range] { flex: 1; height: 4px; }
+  .slider-out { font-size: 15px; font-weight: 500; min-width: 44px; text-align: right; }
+  .chart-wrap { position: relative; width: 100%; height: 400px; margin-top: 0.25rem; }
+  canvas { display: block; }
+  .eq { font-size: 14px; color: #888; margin-bottom: 1rem; line-height: 1.7; }
+  .eq code { font-family: 'SF Mono', Menlo, monospace; font-size: 13px; background: rgba(0,0,0,0.04); padding: 2px 5px; border-radius: 4px; }
+  .btn-reset {
+    font-size: 12px; padding: 5px 12px; border-radius: 6px; cursor: pointer;
+    background: #534AB7; color: #fff; border: none; font-weight: 500; white-space: nowrap;
+  }
+  .btn-reset:hover { background: #433aa0; }
+  .hw-bar { display: flex; flex-wrap: wrap; gap: 16px; font-size: 14px; color: #888; margin-bottom: 1rem; }
+  .hw-bar span { display: flex; align-items: center; gap: 4px; }
+  .hw-bar .chip { background: rgba(0,0,0,0.05); padding: 2px 8px; border-radius: 4px; font-weight: 500; color: #555; }
+  .note { font-size: 13px; color: #A32D2D; margin-bottom: 0.75rem; font-weight: 500; }
+  .desc { font-size: 15px; color: #555; line-height: 1.65; margin-bottom: 1rem; }
+  .desc .katex { font-size: 1em; }
+  .svg-wrap { text-align: center; margin-bottom: 1rem; }
+  .svg-wrap img { max-width: 100%; height: auto; border-radius: 8px; }
+  .session-title {
+    font-size: 24px; font-weight: 700; margin: 3rem 0 1.5rem;
+    padding: 10px 0; border-bottom: 3px solid #534AB7; color: #534AB7;
+  }
+  .session-title:first-of-type { margin-top: 1rem; }
+  @media (prefers-color-scheme: dark) { .desc { color: #aaa; } .svg-wrap img { filter: invert(0.88) hue-rotate(180deg); } }
+  @media (prefers-color-scheme: dark) {
+    .hw-bar .chip { background: rgba(255,255,255,0.08); color: #bbb; }
+    .note { color: #F09595; }
+    .session-title { border-color: #7B73D9; color: #9B95E0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Transformer Layer Roofline Analysis</h1>
+
+  <div class="desc" style="margin-bottom:1.5rem;">
+    This interactive page helps you understand the <b>computation, memory IO, and hardware utilization</b> of each layer in a modern LLM,
+    using <a href="https://huggingface.co/openai/gpt-oss-20b" target="_blank" style="color:#534AB7;">OpenAI's GPT-OSS-20B</a>
+    (a 20.9B-parameter sparse MoE model) as a running example.
+    Use the sliders to explore how sequence length, model dimensions, and batch size affect whether each layer is
+    <span style="color:#A32D2D;font-weight:600;">memory-bound</span> or <span style="color:#1D9E75;font-weight:600;">compute-bound</span>
+    on an NVIDIA A100 GPU.
+  </div>
+
+  <div class="desc">
+    The <b>roofline model</b> bounds attainable performance by the minimum of peak compute and memory bandwidth.
+    For computational intensity $\text{CI} = \frac{\text{FLOPs}}{\text{Bytes}}$, the attainable performance is
+    $\text{Perf} = \min(\text{Peak FLOPS},\; \text{CI} \times \text{BW})$.
+    The <b>ridge point</b> $\text{CI}^* = \frac{\text{Peak}}{\text{BW}}$ separates memory-bound (left) from compute-bound (right) regimes.
+  </div>
+  <div class="svg-wrap"><img src="plots/roofline.svg" alt="Roofline Model" style="max-height:320px;"></div>
+
+  <div class="hw-bar">
+    <span>BF16 peak: <span class="chip">312 TFLOPS</span></span>
+    <span>HBM2e BW: <span class="chip">2.0 TB/s</span></span>
+    <span>Ridge CI: <span class="chip">156 FLOP/B</span></span>
+  </div>
+
+  <h2 class="session-title">Session 1: Transformer Architecture</h2>
+
+  <!-- ════════════════════ RMSNorm ════════════════════ -->
+  <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+    RMSNorm
+    <button class="btn-reset" onclick="resetRMS()">Reset to GPT-OSS-20B</button>
+  </div>
+  <div class="desc">
+    <b>RMSNorm</b> normalizes each token by its root-mean-square, improving training stability without centering.
+    $$\text{RMS}(\mathbf{x}) = \sqrt{\frac{1}{d}\sum_{i=1}^{d} x_i^2}, \qquad \text{RMSNorm}(\mathbf{x}) = \boldsymbol{\gamma} \odot \frac{\mathbf{x}}{\text{RMS}(\mathbf{x}) + \epsilon}$$
+    where $\boldsymbol{\gamma} \in \mathbb{R}^d$ is a learnable scale. With CI $\approx 1$ FLOP/byte, this is always deeply memory-bound.
+  </div>
+  <div class="eq">
+    <code>RMSNorm(x) = γ ⊙ x / (RMS(x) + ε)</code> &nbsp; where &nbsp; <code>RMS(x) = √(1/d × Σ x_i²)</code><br>
+    <code>FLOPs = S × d × 4</code> &nbsp; (square, accumulate, div-by-RMS, scale-by-γ per element)<br>
+    <code>IO = (2×S×d + d) × 2</code> bytes
+  </div>
+  <div class="grid3">
+    <div class="card"><div class="card-label">Model dim (d)</div><div class="slider-row">
+      <input type="range" min="512" max="16384" step="64" value="2880" id="rms-d" /><span class="slider-out" id="rms-d-val">2880</span>
+    </div></div>
+    <div class="card"><div class="card-label">Sequence length (S, S=1 for decode stage)</div><div class="slider-row">
+      <input type="range" min="0" max="17" step="1" value="10" id="rms-s" /><span class="slider-out" id="rms-s-val">1024</span>
+    </div></div>
+    <div class="card"><div class="card-label">Regime</div><div class="card-value" id="rms-regime">—</div></div>
+  </div>
+  <div class="grid3">
+    <div class="card"><div class="card-label">Computational intensity</div><div class="card-value" id="rms-oi">—</div></div>
+    <div class="card"><div class="card-label">Attainable performance</div><div class="card-value" id="rms-perf">—</div></div>
+    <div class="card"><div class="card-label">% of peak</div><div class="card-value" id="rms-pct">—</div></div>
+  </div>
+  <div class="chart-wrap"><canvas id="rms-canvas"></canvas></div>
+
+  <!-- ════════════════════ GQA ════════════════════ -->
+  <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+    Grouped-Query Attention (naive, without Flash-Attention)
+    <button class="btn-reset" onclick="resetGQA()">Reset to GPT-OSS-20B</button>
+  </div>
+  <div class="desc">
+    <b>Grouped-Query Attention (GQA)</b> reduces KV heads while keeping many query heads.
+    $H$ query heads share $H_\text{kv}$ key-value heads (group size $G = H/H_\text{kv}$).
+    $$\mathbf{Q} = \mathbf{X}\mathbf{W}_Q,\quad \mathbf{K} = \mathbf{X}\mathbf{W}_K,\quad \mathbf{V} = \mathbf{X}\mathbf{W}_V$$
+    $$\mathbf{O}_h = \text{softmax}\!\left(\frac{\mathbf{Q}_h \mathbf{K}_{h'}^\top}{\sqrt{d_h}}\right)\mathbf{V}_{h'}, \qquad \mathbf{O} = \text{Concat}(\mathbf{O}_1,\ldots,\mathbf{O}_H)\,\mathbf{W}_O$$
+    In the naive (non-Flash) prefill, the full $S \times S$ attention matrix is materialized to HBM per head.
+  </div>
+  <div class="svg-wrap"><img src="plots/gqa.svg" alt="Grouped-Query Attention" style="max-height:300px;"></div>
+  <div class="note">Materializes full S x S attention matrix to HBM per head — includes O_proj</div>
+  <div class="eq">
+    <code>FLOPs = 2×S×d×hd×(2H+2H_kv) + H×S²×(4×hd+5)</code><br>
+    <code>IO_proj = [2×S×d + d×hd×(2H+2H_kv) + S×hd×(2H+2H_kv)] × 2</code><br>
+    <code>IO_attn = H × [4×S×hd + 4×S²] × 2</code>
+  </div>
+  <div class="grid5">
+    <div class="card"><div class="card-label">Model dim (d)</div><div class="slider-row">
+      <input type="range" min="512" max="16384" step="64" value="2880" id="gqa-d" /><span class="slider-out" id="gqa-d-val">2880</span>
+    </div></div>
+    <div class="card"><div class="card-label">Head dim (hd)</div><div class="slider-row">
+      <input type="range" min="32" max="256" step="16" value="64" id="gqa-hd" /><span class="slider-out" id="gqa-hd-val">64</span>
+    </div></div>
+    <div class="card"><div class="card-label">Query heads (H)</div><div class="slider-row">
+      <input type="range" min="1" max="128" step="1" value="64" id="gqa-h" /><span class="slider-out" id="gqa-h-val">64</span>
+    </div></div>
+    <div class="card"><div class="card-label">KV heads (H_kv)</div><div class="slider-row">
+      <input type="range" min="1" max="128" step="1" value="8" id="gqa-hkv" /><span class="slider-out" id="gqa-hkv-val">8</span>
+    </div></div>
+    <div class="card"><div class="card-label">Sequence length (S, S=1 for decode stage)</div><div class="slider-row">
+      <input type="range" min="0" max="17" step="1" value="10" id="gqa-s" /><span class="slider-out" id="gqa-s-val">1024</span>
+    </div></div>
+  </div>
+  <div class="grid3">
+    <div class="card"><div class="card-label">Computational intensity</div><div class="card-value" id="gqa-oi">—</div></div>
+    <div class="card"><div class="card-label">Attainable performance</div><div class="card-value" id="gqa-perf">—</div></div>
+    <div class="card"><div class="card-label">Regime</div><div class="card-value" id="gqa-regime">—</div></div>
+  </div>
+  <div class="chart-wrap"><canvas id="gqa-canvas"></canvas></div>
+
+  <!-- ════════════════════ Dense FFN ════════════════════ -->
+  <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+    Dense FFN (SwiGLU)
+    <button class="btn-reset" onclick="resetFFN()">Reset to GPT-OSS-20B</button>
+  </div>
+  <div class="desc">
+    <b>SwiGLU FFN</b> uses a gated linear unit with Swish activation.
+    The gate projection $\mathbf{W}_1$ and up projection $\mathbf{W}_3$ produce two $d_\text{ff}$-dimensional
+    vectors combined element-wise, then the down projection $\mathbf{W}_2$ maps back to $\mathbb{R}^d$.
+    $$\text{FFN}(\mathbf{x}) = \bigl(\text{Swish}(\mathbf{x}\mathbf{W}_1) \odot \mathbf{x}\mathbf{W}_3\bigr)\mathbf{W}_2, \qquad \text{Swish}(z) = z \times \sigma(z)$$
+  </div>
+  <div class="svg-wrap"><img src="plots/ffn.svg" alt="SwiGLU FFN" style="max-height:220px;"></div>
+  <div class="eq">
+    <code>FFN(x) = (Swish(xW₁) ⊙ xW₃) W₂</code><br>
+    <code>FLOPs = S × d_ff × (6×d + 6)</code> &nbsp;|&nbsp;
+    <code>IO = d × d_ff × 1.59 + S × (6×d + 12×d_ff)</code> bytes
+  </div>
+  <div class="grid3">
+    <div class="card"><div class="card-label">Model dim (d)</div><div class="slider-row">
+      <input type="range" min="512" max="16384" step="64" value="2880" id="ffn-d" /><span class="slider-out" id="ffn-d-val">2880</span>
+    </div></div>
+    <div class="card"><div class="card-label">FFN dim (d_ff)</div><div class="slider-row">
+      <input type="range" min="512" max="32768" step="64" value="2880" id="ffn-dff" /><span class="slider-out" id="ffn-dff-val">2880</span>
+    </div></div>
+    <div class="card"><div class="card-label">Sequence length (S, S=1 for decode stage)</div><div class="slider-row">
+      <input type="range" min="0" max="17" step="1" value="10" id="ffn-s" /><span class="slider-out" id="ffn-s-val">1024</span>
+    </div></div>
+  </div>
+  <div class="grid3">
+    <div class="card"><div class="card-label">Computational intensity</div><div class="card-value" id="ffn-oi">—</div></div>
+    <div class="card"><div class="card-label">Attainable performance</div><div class="card-value" id="ffn-perf">—</div></div>
+    <div class="card"><div class="card-label">Regime</div><div class="card-value" id="ffn-regime">—</div></div>
+  </div>
+  <div class="chart-wrap"><canvas id="ffn-canvas"></canvas></div>
+
+  <!-- ════════════════════ MoE ════════════════════ -->
+  <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+    Mixture of Experts (MoE)
+    <button class="btn-reset" onclick="resetMoE()">Reset to GPT-OSS-20B</button>
+  </div>
+  <div class="desc">
+    <b>Mixture of Experts (MoE)</b> sparsely scales model capacity by routing each token to the top-$K$ of $E$ expert FFNs.
+    The router computes scores $\mathbf{g} = \text{softmax}(\mathbf{W}_r \mathbf{x})$, selects the top-$K$ experts $\mathcal{T}$,
+    and the output is:
+    $$\text{MoE}(\mathbf{x}) = \sum_{i \in \mathcal{T}} \hat{g}_i \times \text{FFN}_i(\mathbf{x}), \qquad \hat{g}_i = \frac{g_i}{\sum_{j \in \mathcal{T}} g_j}$$
+    Weight IO is dominated by $K_\text{unique}$ (unique experts activated across the batch).
+  </div>
+  <div class="svg-wrap"><img src="plots/moe.svg" alt="Mixture of Experts" style="max-height:300px;"></div>
+  <div class="eq">
+    <code>MoE(x) = Σ p_i × FFN_i(x)</code><br>
+    <code>FLOPs = S×d×E×2 + K×S×d_ff×(6×d+6) + S×d×(2×K−1)</code><br>
+    <code>IO = (S×d + S×E + d×E)×2 + K_u×d×d_ff×1.59 + K×S×(6×d+12×d_ff) + S×d×(2×K+2)×2</code> bytes
+  </div>
+  <div class="grid4">
+    <div class="card"><div class="card-label">Model dim (d)</div><div class="slider-row">
+      <input type="range" min="512" max="16384" step="64" value="2880" id="moe-d" /><span class="slider-out" id="moe-d-val">2880</span>
+    </div></div>
+    <div class="card"><div class="card-label">FFN dim (d_ff)</div><div class="slider-row">
+      <input type="range" min="512" max="32768" step="64" value="2880" id="moe-dff" /><span class="slider-out" id="moe-dff-val">2880</span>
+    </div></div>
+    <div class="card"><div class="card-label">Experts (E)</div><div class="slider-row">
+      <input type="range" min="2" max="128" step="1" value="32" id="moe-e" /><span class="slider-out" id="moe-e-val">32</span>
+    </div></div>
+    <div class="card"><div class="card-label">Top-K</div><div class="slider-row">
+      <input type="range" min="1" max="16" step="1" value="4" id="moe-k" /><span class="slider-out" id="moe-k-val">4</span>
+    </div></div>
+  </div>
+  <div class="grid4">
+    <div class="card"><div class="card-label">Sequence length (S, S=1 for decode stage)</div><div class="slider-row">
+      <input type="range" min="0" max="17" step="1" value="10" id="moe-s" /><span class="slider-out" id="moe-s-val">1024</span>
+    </div></div>
+    <div class="card"><div class="card-label">K_unique (activated experts)</div><div class="slider-row">
+      <input type="range" min="1" max="128" step="1" value="32" id="moe-ku" /><span class="slider-out" id="moe-ku-val">32</span>
+    </div></div>
+    <div class="card"><div class="card-label">Computational intensity</div><div class="card-value" id="moe-oi">—</div></div>
+    <div class="card"><div class="card-label">Regime</div><div class="card-value" id="moe-regime">—</div></div>
+  </div>
+  <div class="chart-wrap"><canvas id="moe-canvas"></canvas></div>
+
+  <!-- ════════════════════ LM Head ════════════════════ -->
+  <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+    LM Head (Linear + Softmax)
+    <button class="btn-reset" onclick="resetLM()">Reset to GPT-OSS-20B</button>
+  </div>
+  <div class="desc">
+    The <b>LM Head</b> maps the final hidden state to vocabulary-sized logits and applies softmax to produce next-token probabilities.
+    $$\text{logits} = \mathbf{x}\,\mathbf{W}_\text{lm}, \qquad p_i = \frac{\exp(\text{logit}_i)}{\sum_j \exp(\text{logit}_j)}$$
+    where $\mathbf{W}_\text{lm} \in \mathbb{R}^{d \times V}$ with $V$ = vocabulary size (201,088 for GPT-OSS-20B).
+  </div>
+  <div class="svg-wrap"><img src="plots/lmhead.svg" alt="LM Head" style="max-height:220px;"></div>
+  <div class="eq">
+    <code>logits = x × W_lm</code> &nbsp; then &nbsp; <code>p = softmax(logits)</code><br>
+    <code>FLOPs = S×d×V×2 + S×V×4</code><br>
+    <code>IO = (S×d + d×V + S×V×3) × 2</code> bytes &nbsp; (write logits + read for softmax + write probs)
+  </div>
+  <div class="grid3">
+    <div class="card"><div class="card-label">Model dim (d)</div><div class="slider-row">
+      <input type="range" min="512" max="16384" step="64" value="2880" id="lm-d" /><span class="slider-out" id="lm-d-val">2880</span>
+    </div></div>
+    <div class="card"><div class="card-label">Vocab size (V)</div><div class="slider-row">
+      <input type="range" min="1024" max="262144" step="1024" value="201088" id="lm-v" /><span class="slider-out" id="lm-v-val">201088</span>
+    </div></div>
+    <div class="card"><div class="card-label">Sequence length (S, S=1 for decode stage)</div><div class="slider-row">
+      <input type="range" min="0" max="17" step="1" value="10" id="lm-s" /><span class="slider-out" id="lm-s-val">1024</span>
+    </div></div>
+  </div>
+  <div class="grid3">
+    <div class="card"><div class="card-label">Computational intensity</div><div class="card-value" id="lm-oi">—</div></div>
+    <div class="card"><div class="card-label">Attainable performance</div><div class="card-value" id="lm-perf">—</div></div>
+    <div class="card"><div class="card-label">Regime</div><div class="card-value" id="lm-regime">—</div></div>
+  </div>
+  <div class="chart-wrap"><canvas id="lm-canvas"></canvas></div>
+
+  <!-- ════════════════════ Decode GQA ════════════════════ -->
+  <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+    GQA Decode (1 token + KV cache, naive, with O_proj)
+    <button class="btn-reset" onclick="resetDec()">Reset to GPT-OSS-20B</button>
+  </div>
+  <div class="desc">
+    During <b>decode</b>, a single new token $\mathbf{x}_t$ is projected to $\mathbf{q}_t$, $\mathbf{k}_t$, $\mathbf{v}_t$.
+    The new $\mathbf{k}_t, \mathbf{v}_t$ are appended to the <b>KV cache</b>, then attention is computed against all $S_\text{KV}$ cached entries:
+    $$\mathbf{o}_t = \sum_{i=1}^{t} \text{softmax}\!\left(\frac{\mathbf{q}_t^\top \mathbf{k}_i}{\sqrt{d_h}}\right) \mathbf{v}_i$$
+    This is deeply memory-bound: very little compute (no $S^2$ matmul) but the entire KV cache must be read from HBM.
+  </div>
+  <div class="svg-wrap"><img src="plots/kv cache.svg" alt="KV Cache Decode" style="max-height:280px;"></div>
+  <div class="note">Single new token attending to S_KV cached tokens — no Flash-Attention</div>
+  <div class="eq">
+    <code>FLOPs = 2×d×hd×(2H+2H_kv) + H×S_KV×(4×hd+5)</code><br>
+    <code>IO_proj = [2×d + d×hd×(2H+2H_kv) + hd×(2H+2H_kv)] × 2</code><br>
+    <code>IO_attn = H × [2×hd×(S_KV+1) + 4×S_KV] × 2</code>
+  </div>
+  <div class="grid5">
+    <div class="card"><div class="card-label">Model dim (d)</div><div class="slider-row">
+      <input type="range" min="512" max="16384" step="64" value="2880" id="dec-d" /><span class="slider-out" id="dec-d-val">2880</span>
+    </div></div>
+    <div class="card"><div class="card-label">Head dim (hd)</div><div class="slider-row">
+      <input type="range" min="32" max="256" step="16" value="64" id="dec-hd" /><span class="slider-out" id="dec-hd-val">64</span>
+    </div></div>
+    <div class="card"><div class="card-label">Query heads (H)</div><div class="slider-row">
+      <input type="range" min="1" max="128" step="1" value="64" id="dec-h" /><span class="slider-out" id="dec-h-val">64</span>
+    </div></div>
+    <div class="card"><div class="card-label">KV heads (H_kv)</div><div class="slider-row">
+      <input type="range" min="1" max="128" step="1" value="8" id="dec-hkv" /><span class="slider-out" id="dec-hkv-val">8</span>
+    </div></div>
+    <div class="card"><div class="card-label">KV cache len (S_KV)</div><div class="slider-row">
+      <input type="range" min="0" max="17" step="1" value="10" id="dec-skv" /><span class="slider-out" id="dec-skv-val">1024</span>
+    </div></div>
+  </div>
+  <div class="grid3">
+    <div class="card"><div class="card-label">Computational intensity</div><div class="card-value" id="dec-oi">—</div></div>
+    <div class="card"><div class="card-label">Attainable performance</div><div class="card-value" id="dec-perf">—</div></div>
+    <div class="card"><div class="card-label">Regime</div><div class="card-value" id="dec-regime">—</div></div>
+  </div>
+  <div class="chart-wrap"><canvas id="dec-canvas"></canvas></div>
+
+  <!-- ════════════════════ Memory Budget ════════════════════ -->
+  <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+    A100 Memory Budget (Weights + KV Cache)
+    <button class="btn-reset" onclick="resetMem()">Reset to GPT-OSS-20B</button>
+  </div>
+  <div class="eq">
+    <code>Weights = L × [d×hd×(2H+2H_kv) + E×3×d×d_ff + d×E + 2×d] + 2×V×d + d</code> params<br>
+  <div class="desc">
+    End-to-end memory budget for deploying the model on A100 80GB.
+    Weights use <b>mixed precision</b>: BF16 for attention, router, embedding, LM head; MXFP4 for MoE FFN weights.
+    The KV cache is split between <b>full attention</b> layers (cache all $S_\text{KV}$ tokens) and
+    <b>sliding window</b> layers (cache only $\min(S_\text{KV}, W)$ tokens).
+  </div>
+  <div class="svg-wrap"><img src="plots/gpt_oss.svg" alt="GPT-OSS Architecture" style="max-height:340px;"></div>
+  <div class="eq">
+    <code>KV_full = B × S_KV × L_full × hd × H_kv × 2 × 2</code> &nbsp;|&nbsp;
+    <code>KV_swa = B × min(S_KV, W) × L_swa × hd × H_kv × 2 × 2</code> bytes (BF16, W=sliding window)
+  </div>
+
+  <div class="grid4">
+    <div class="card"><div class="card-label">Model dim (d)</div><div class="slider-row">
+      <input type="range" min="512" max="16384" step="64" value="2880" id="mem-d" /><span class="slider-out" id="mem-d-val">2880</span>
+    </div></div>
+    <div class="card"><div class="card-label">FFN dim (d_ff)</div><div class="slider-row">
+      <input type="range" min="512" max="32768" step="64" value="2880" id="mem-dff" /><span class="slider-out" id="mem-dff-val">2880</span>
+    </div></div>
+    <div class="card"><div class="card-label">Head dim (hd)</div><div class="slider-row">
+      <input type="range" min="32" max="256" step="16" value="64" id="mem-hd" /><span class="slider-out" id="mem-hd-val">64</span>
+    </div></div>
+    <div class="card"><div class="card-label">Query heads (H)</div><div class="slider-row">
+      <input type="range" min="1" max="128" step="1" value="64" id="mem-h" /><span class="slider-out" id="mem-h-val">64</span>
+    </div></div>
+  </div>
+  <div class="grid4">
+    <div class="card"><div class="card-label">KV heads (H_kv)</div><div class="slider-row">
+      <input type="range" min="1" max="128" step="1" value="8" id="mem-hkv" /><span class="slider-out" id="mem-hkv-val">8</span>
+    </div></div>
+    <div class="card"><div class="card-label">Experts (E)</div><div class="slider-row">
+      <input type="range" min="1" max="128" step="1" value="32" id="mem-e" /><span class="slider-out" id="mem-e-val">32</span>
+    </div></div>
+    <div class="card"><div class="card-label">Layers (L)</div><div class="slider-row">
+      <input type="range" min="1" max="128" step="1" value="24" id="mem-l" /><span class="slider-out" id="mem-l-val">24</span>
+    </div></div>
+    <div class="card"><div class="card-label">Vocab size (V)</div><div class="slider-row">
+      <input type="range" min="1024" max="262144" step="1024" value="201088" id="mem-v" /><span class="slider-out" id="mem-v-val">201088</span>
+    </div></div>
+  </div>
+  <div class="grid4">
+    <div class="card"><div class="card-label">MoE FFN weight format</div><div class="slider-row">
+      <select id="mem-wfmt" style="flex:1;background:#fff;border:1px solid rgba(0,0,0,0.1);border-radius:4px;padding:4px;font-size:13px;">
+        <option value="0.53125" selected>MXFP4 (0.53 B)</option>
+        <option value="1">FP8 (1 B)</option>
+        <option value="2">BF16 (2 B)</option>
+      </select>
+    </div></div>
+    <div class="card"><div class="card-label">Batch size (B)</div><div class="slider-row">
+      <input type="range" min="1" max="512" step="1" value="1" id="mem-b" /><span class="slider-out" id="mem-b-val">1</span>
+    </div></div>
+    <div class="card"><div class="card-label">KV cache len (S_KV)</div><div class="slider-row">
+      <input type="range" min="0" max="17" step="1" value="10" id="mem-skv" /><span class="slider-out" id="mem-skv-val">1024</span>
+    </div></div>
+    <div class="card"><div class="card-label">A100 HBM</div><div class="card-value">80 GB</div></div>
+  </div>
+  <div class="grid4">
+    <div class="card"><div class="card-label">Sliding window (W)</div><div class="slider-row">
+      <input type="range" min="64" max="4096" step="64" value="128" id="mem-sw" /><span class="slider-out" id="mem-sw-val">128</span>
+    </div></div>
+    <div class="card"><div class="card-label">Full attn layers (L_full)</div><div class="slider-row">
+      <input type="range" min="0" max="128" step="1" value="12" id="mem-lfull" /><span class="slider-out" id="mem-lfull-val">12</span>
+    </div></div>
+    <div class="card"><div class="card-label">SWA layers (L_swa)</div><div class="slider-row">
+      <input type="range" min="0" max="128" step="1" value="12" id="mem-lswa" /><span class="slider-out" id="mem-lswa-val">12</span>
+    </div></div>
+    <div class="card"><div class="card-label">L_full + L_swa must = L</div><div class="card-value" id="mem-lcheck" style="font-size:13px;">—</div></div>
+  </div>
+
+  <div class="grid4">
+    <div class="card"><div class="card-label">Total params</div><div class="card-value" id="mem-params">—</div></div>
+    <div class="card"><div class="card-label">Weight memory</div><div class="card-value" id="mem-weights">—</div></div>
+    <div class="card"><div class="card-label">KV cache (full attn)</div><div class="card-value" id="mem-kv-full" style="color:#2E86C1;">—</div></div>
+    <div class="card"><div class="card-label">KV cache (SWA)</div><div class="card-value" id="mem-kv-swa" style="color:#E67E22;">—</div></div>
+  </div>
+  <div class="grid3">
+    <div class="card"><div class="card-label">Total memory</div><div class="card-value" id="mem-total">—</div></div>
+    <div class="card"><div class="card-label">Remaining</div><div class="card-value" id="mem-remain">—</div></div>
+    <div class="card"><div class="card-label">Max S_KV at this batch (fits 80 GB)</div><div class="card-value" id="mem-maxskv">—</div></div>
+  </div>
+
+  <div class="chart-wrap" style="height:100px;"><canvas id="mem-canvas"></canvas></div>
+
+  <!-- ════════════════════ Session 2 ════════════════════ -->
+  <h2 class="session-title">Session 2: Flash Attention</h2>
+
+  <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+    Flash Attention vs Naive Attention (Prefill)
+    <button class="btn-reset" onclick="resetFlash()">Reset to GPT-OSS-20B</button>
+  </div>
+  <div class="desc">
+    <b>Flash Attention</b> computes exact attention without materializing the $S \times S$ attention matrix to HBM.
+    By tiling the computation and keeping the attention matrix in SRAM, the HBM IO reduces to just reading Q, K, V
+    and writing O — eliminating the $O(S^2)$ memory traffic.
+    $$\text{IO}_\text{naive} = H \times (4 S \cdot hd + 4 S^2) \times 2 \qquad \text{IO}_\text{flash} = H \times 4 S \cdot hd \times 2$$
+    FLOPs remain identical — Flash Attention changes only the memory access pattern, not the computation.
+  </div>
+  <div class="eq">
+    <code>FLOPs (both) = H × S² × (4×hd + 5)</code><br>
+    <code>Naive IO = H × (4×S×hd + 4×S²) × 2</code> &nbsp; (materializes S×S attn matrix)<br>
+    <code>Flash IO = H × 4×S×hd × 2</code> &nbsp; (only Q, K, V, O to HBM)
+  </div>
+  <div class="grid3">
+    <div class="card"><div class="card-label">Head dim (hd)</div><div class="slider-row">
+      <input type="range" min="32" max="256" step="16" value="64" id="flash-hd" /><span class="slider-out" id="flash-hd-val">64</span>
+    </div></div>
+    <div class="card"><div class="card-label">Query heads (H)</div><div class="slider-row">
+      <input type="range" min="1" max="128" step="1" value="64" id="flash-h" /><span class="slider-out" id="flash-h-val">64</span>
+    </div></div>
+    <div class="card"><div class="card-label">Sequence length (S)</div><div class="slider-row">
+      <input type="range" min="0" max="17" step="1" value="10" id="flash-s" /><span class="slider-out" id="flash-s-val">1024</span>
+    </div></div>
+  </div>
+  <div class="grid4">
+    <div class="card"><div class="card-label">Naive CI</div><div class="card-value" id="flash-naive-oi">—</div></div>
+    <div class="card"><div class="card-label">Naive Regime</div><div class="card-value" id="flash-naive-regime">—</div></div>
+    <div class="card"><div class="card-label">Flash CI</div><div class="card-value" id="flash-flash-oi">—</div></div>
+    <div class="card"><div class="card-label">Flash Regime</div><div class="card-value" id="flash-flash-regime">—</div></div>
+  </div>
+  <div class="grid3">
+    <div class="card"><div class="card-label">Naive IO (total)</div><div class="card-value" id="flash-naive-io">—</div></div>
+    <div class="card"><div class="card-label">Flash IO (total)</div><div class="card-value" id="flash-flash-io">—</div></div>
+    <div class="card"><div class="card-label">IO reduction</div><div class="card-value" id="flash-io-ratio" style="color:#534AB7;">—</div></div>
+  </div>
+  <div class="chart-wrap"><canvas id="flash-canvas"></canvas></div>
+
+</div>
+
+<script>
+/* ═══════ Constants ═══════ */
+const PEAK = 312, BW = 2.0, RIDGE = PEAK / BW;
+const S_STEPS = [1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072];
+
+/* GPT-OSS-20B defaults */
+/* head_dim=64 per HF config (NOT 128 as in slides) */
+const GPT_OSS = { d: 2880, dff: 2880, hd: 64, H: 64, Hkv: 8, E: 32, K: 4, V: 201088, L: 24, sIdx: 10 };
+
+/* ═══════ Helpers ═══════ */
+function attainable(oi) { return Math.min(PEAK, oi * BW); }
+
+function drawRoofline(canvas, oi, perf, isMem, label) {
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
+  canvas.style.width = rect.width + 'px'; canvas.style.height = rect.height + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+  const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const txt = isDark ? '#d3d1c7' : '#5f5e5a', grid = isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)';
+  const roof = isDark ? '#e0dfd8' : '#2c2c2a';
+  ctx.clearRect(0, 0, W, H);
+  const pad = { l: 66, r: 22, t: 22, b: 44 }, pw = W-pad.l-pad.r, ph = H-pad.t-pad.b;
+  const xMin = -1, xMax = 4, yMin = -1, yMax = 3;
+  const toX = lx => pad.l + (lx-xMin)/(xMax-xMin)*pw;
+  const toY = ly => pad.t + ph - (ly-yMin)/(yMax-yMin)*ph;
+
+  ctx.strokeStyle = grid; ctx.lineWidth = 1;
+  for (let i = Math.ceil(xMin); i <= xMax; i++) { ctx.beginPath(); ctx.moveTo(toX(i),pad.t); ctx.lineTo(toX(i),pad.t+ph); ctx.stroke(); }
+  for (let i = Math.ceil(yMin); i <= yMax; i++) { ctx.beginPath(); ctx.moveTo(pad.l,toY(i)); ctx.lineTo(pad.l+pw,toY(i)); ctx.stroke(); }
+
+  ctx.fillStyle = txt; ctx.font = '11px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (let i = Math.ceil(xMin); i <= xMax; i++) { const v=Math.pow(10,i); ctx.fillText(v>=1?v.toFixed(0):v.toFixed(1), toX(i), pad.t+ph+4); }
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let i = Math.ceil(yMin); i <= yMax; i++) { const v=Math.pow(10,i); ctx.fillText(v>=1?v.toFixed(0):v.toFixed(1), pad.l-8, toY(i)); }
+
+  ctx.fillStyle = txt; ctx.font = '12px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText('Computational Intensity (FLOPs / byte)', pad.l+pw/2, H-12);
+  ctx.save(); ctx.translate(14, pad.t+ph/2); ctx.rotate(-Math.PI/2);
+  ctx.textBaseline = 'middle'; ctx.fillText('Attainable Performance (TFLOPS)', 0, 0); ctx.restore();
+
+  ctx.strokeStyle = roof; ctx.lineWidth = 2.5; ctx.lineJoin = 'round'; ctx.beginPath();
+  for (let i = 0; i <= 300; i++) {
+    const lx = xMin+(xMax-xMin)*i/300, o = Math.pow(10,lx), p = attainable(o), ly = Math.log10(p);
+    if (ly<yMin||ly>yMax) continue; i===0?ctx.moveTo(toX(lx),toY(ly)):ctx.lineTo(toX(lx),toY(ly));
+  } ctx.stroke();
+
+  const rlx = Math.log10(RIDGE);
+  ctx.setLineDash([5,4]); ctx.strokeStyle=isDark?'rgba(255,255,255,0.2)':'rgba(0,0,0,0.15)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(toX(rlx),pad.t); ctx.lineTo(toX(rlx),pad.t+ph); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle=isDark?'rgba(255,255,255,0.35)':'rgba(0,0,0,0.3)'; ctx.font='10px system-ui'; ctx.textAlign='left'; ctx.textBaseline='top';
+  ctx.fillText('ridge = '+RIDGE.toFixed(0), toX(rlx)+4, pad.t+4);
+  ctx.font='11px system-ui'; ctx.textBaseline='bottom';
+  ctx.fillStyle=isDark?'rgba(163,45,45,0.45)':'rgba(163,45,45,0.3)'; ctx.textAlign='right';
+  ctx.fillText('Memory bound', toX(rlx)-8, pad.t+ph-6);
+  ctx.fillStyle=isDark?'rgba(29,158,117,0.45)':'rgba(29,158,117,0.3)'; ctx.textAlign='left';
+  ctx.fillText('Compute bound', toX(rlx)+8, pad.t+ph-6);
+  ctx.fillStyle=txt; ctx.font='10px system-ui'; ctx.textAlign='right'; ctx.textBaseline='bottom';
+  ctx.fillText(PEAK+' TFLOPS', pad.l+pw, toY(Math.log10(PEAK))-6);
+
+  const cOi = Math.max(Math.pow(10,xMin), Math.min(Math.pow(10,xMax), oi));
+  const cP = Math.max(Math.pow(10,yMin), Math.min(Math.pow(10,yMax), perf));
+  const dx = toX(Math.log10(cOi)), dy = toY(Math.log10(cP));
+  const dotColor = isMem ? '#A32D2D' : '#1D9E75';
+  const glow = ctx.createRadialGradient(dx,dy,0,dx,dy,20);
+  glow.addColorStop(0, dotColor+'40'); glow.addColorStop(1, dotColor+'00');
+  ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(dx,dy,20,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = dotColor; ctx.beginPath(); ctx.arc(dx,dy,6,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(dx,dy,6,0,Math.PI*2); ctx.stroke();
+  const ll = dx < pad.l+pw*0.7; ctx.textAlign = ll?'left':'right'; const lx2 = ll?dx+12:dx-12;
+  ctx.fillStyle = dotColor; ctx.font = 'bold 12px system-ui'; ctx.textBaseline = 'bottom';
+  ctx.fillText(label+'  CI='+oi.toFixed(1), lx2, dy-4);
+  ctx.font = '11px system-ui'; ctx.fillStyle = txt; ctx.textBaseline = 'top';
+  ctx.fillText(perf.toFixed(1)+' TFLOPS ('+((perf/PEAK)*100).toFixed(1)+'%)', lx2, dy+4);
+}
+
+/* ═══════ RMSNorm ═══════ */
+function updateRMS() {
+  const d = +document.getElementById('rms-d').value, S = S_STEPS[+document.getElementById('rms-s').value];
+  document.getElementById('rms-d-val').textContent = d; document.getElementById('rms-s-val').textContent = S;
+  const flops = S*d*4, io = (2*S*d + d)*2, oi = flops/io, perf = attainable(oi), isMem = oi < RIDGE;
+  document.getElementById('rms-oi').textContent = oi.toFixed(3)+' FLOP/B';
+  document.getElementById('rms-perf').textContent = perf.toFixed(1)+' TFLOPS';
+  document.getElementById('rms-pct').textContent = ((perf/PEAK)*100).toFixed(2)+'%';
+  const r = document.getElementById('rms-regime'); r.textContent = isMem?'Memory bound':'Compute bound'; r.className = 'card-value '+(isMem?'mem':'comp');
+  drawRoofline(document.getElementById('rms-canvas'), oi, perf, isMem, 'S='+S);
+}
+function resetRMS() { document.getElementById('rms-d').value=GPT_OSS.d; document.getElementById('rms-s').value=GPT_OSS.sIdx; updateRMS(); }
+
+/* ═══════ GQA ═══════ */
+function updateGQA() {
+  const d=+document.getElementById('gqa-d').value, hd=+document.getElementById('gqa-hd').value;
+  const H=+document.getElementById('gqa-h').value, S=S_STEPS[+document.getElementById('gqa-s').value];
+  let Hkv=+document.getElementById('gqa-hkv').value;
+  if (Hkv>H){Hkv=H; document.getElementById('gqa-hkv').value=Hkv;}
+  document.getElementById('gqa-d-val').textContent=d; document.getElementById('gqa-hd-val').textContent=hd;
+  document.getElementById('gqa-h-val').textContent=H; document.getElementById('gqa-hkv-val').textContent=Hkv;
+  document.getElementById('gqa-s-val').textContent=S;
+  // QKV proj: 2·S·d·hd·(H+2Hkv), O proj: 2·S·H·hd·d → combined: 2·S·d·hd·(2H+2Hkv)
+  const projFlops = 2*S*d*hd*(2*H+2*Hkv), attnFlops = H*S*S*(4*hd+5);
+  const totalFlops = projFlops + attnFlops;
+  // QKV IO: read x(S·d) + weights d·hd·(H+2Hkv) + outputs S·hd·(H+2Hkv)
+  // O IO:  read concat(S·H·hd) + weight(H·hd·d) + write(S·d)
+  // Combined: [2·S·d + d·hd·(2H+2Hkv) + S·hd·(2H+2Hkv)] × 2
+  const projIO = (2*S*d + d*hd*(2*H+2*Hkv) + S*hd*(2*H+2*Hkv))*2;
+  const attnIO = H*(4*S*hd + 4*S*S)*2;
+  const totalIO = projIO + attnIO;
+  const oi=totalFlops/totalIO, perf=attainable(oi), isMem=oi<RIDGE;
+  document.getElementById('gqa-oi').textContent=oi.toFixed(1)+' FLOP/B';
+  document.getElementById('gqa-perf').textContent=perf.toFixed(1)+' TFLOPS';
+  const r=document.getElementById('gqa-regime'); r.textContent=isMem?'Memory bound':'Compute bound'; r.className='card-value '+(isMem?'mem':'comp');
+  drawRoofline(document.getElementById('gqa-canvas'), oi, perf, isMem, 'S='+S+' H='+H+' Hkv='+Hkv);
+}
+function resetGQA() {
+  document.getElementById('gqa-d').value=GPT_OSS.d; document.getElementById('gqa-hd').value=GPT_OSS.hd;
+  document.getElementById('gqa-h').value=GPT_OSS.H; document.getElementById('gqa-hkv').value=GPT_OSS.Hkv;
+  document.getElementById('gqa-s').value=GPT_OSS.sIdx; updateGQA();
+}
+
+/* ═══════ Decode GQA ═══════ */
+function updateDec() {
+  const d=+document.getElementById('dec-d').value, hd=+document.getElementById('dec-hd').value;
+  const H=+document.getElementById('dec-h').value, Skv=S_STEPS[+document.getElementById('dec-skv').value];
+  let Hkv=+document.getElementById('dec-hkv').value;
+  if (Hkv>H){Hkv=H; document.getElementById('dec-hkv').value=Hkv;}
+  document.getElementById('dec-d-val').textContent=d; document.getElementById('dec-hd-val').textContent=hd;
+  document.getElementById('dec-h-val').textContent=H; document.getElementById('dec-hkv-val').textContent=Hkv;
+  document.getElementById('dec-skv-val').textContent=Skv;
+  // FLOPs: proj(QKV+O) same structure as prefill with S=1, attn uses S_KV
+  // Proj: 2·1·d·hd·(2H+2Hkv)
+  // Attn per head: QK^T(2·S_KV·hd) + scale(S_KV) + softmax(4·S_KV) + AV(2·S_KV·hd) = S_KV·(4·hd+5)
+  const projFlops = 2*d*hd*(2*H+2*Hkv);
+  const attnFlops = H*Skv*(4*hd+5);
+  const totalFlops = projFlops + attnFlops;
+  // IO proj: same as prefill with S=1: [2·d + d·hd·(2H+2Hkv) + hd·(2H+2Hkv)] × 2
+  const projIO = (2*d + d*hd*(2*H+2*Hkv) + hd*(2*H+2*Hkv))*2;
+  // IO attn per head: QK^T(hd + Skv·hd + Skv) + softmax(2·Skv) + AV(Skv + Skv·hd + hd)
+  //   = 2·hd·(Skv+1) + 4·Skv
+  const attnIO = H*(2*hd*(Skv+1) + 4*Skv)*2;
+  const totalIO = projIO + attnIO;
+  const oi=totalFlops/totalIO, perf=attainable(oi), isMem=oi<RIDGE;
+  document.getElementById('dec-oi').textContent=oi.toFixed(1)+' FLOP/B';
+  document.getElementById('dec-perf').textContent=perf.toFixed(1)+' TFLOPS';
+  const r=document.getElementById('dec-regime'); r.textContent=isMem?'Memory bound':'Compute bound'; r.className='card-value '+(isMem?'mem':'comp');
+  drawRoofline(document.getElementById('dec-canvas'), oi, perf, isMem, 'Skv='+Skv+' H='+H+' Hkv='+Hkv);
+}
+function resetDec() {
+  document.getElementById('dec-d').value=GPT_OSS.d; document.getElementById('dec-hd').value=GPT_OSS.hd;
+  document.getElementById('dec-h').value=GPT_OSS.H; document.getElementById('dec-hkv').value=GPT_OSS.Hkv;
+  document.getElementById('dec-skv').value=GPT_OSS.sIdx; updateDec();
+}
+
+/* ═══════ Dense FFN ═══════ */
+function updateFFN() {
+  const d=+document.getElementById('ffn-d').value, dff=+document.getElementById('ffn-dff').value;
+  const S=S_STEPS[+document.getElementById('ffn-s').value];
+  document.getElementById('ffn-d-val').textContent=d; document.getElementById('ffn-dff-val').textContent=dff;
+  document.getElementById('ffn-s-val').textContent=S;
+  const flops=S*dff*(6*d+6), io=d*dff*1.59375+S*(6*d+12*dff);
+  const oi=flops/io, perf=attainable(oi), isMem=oi<RIDGE;
+  document.getElementById('ffn-oi').textContent=oi.toFixed(1)+' FLOP/B';
+  document.getElementById('ffn-perf').textContent=perf.toFixed(1)+' TFLOPS';
+  const r=document.getElementById('ffn-regime'); r.textContent=isMem?'Memory bound':'Compute bound'; r.className='card-value '+(isMem?'mem':'comp');
+  drawRoofline(document.getElementById('ffn-canvas'), oi, perf, isMem, 'S='+S);
+}
+function resetFFN() { document.getElementById('ffn-d').value=GPT_OSS.d; document.getElementById('ffn-dff').value=GPT_OSS.dff; document.getElementById('ffn-s').value=GPT_OSS.sIdx; updateFFN(); }
+
+/* ═══════ MoE ═══════ */
+function updateMoE() {
+  const d=+document.getElementById('moe-d').value, dff=+document.getElementById('moe-dff').value;
+  const E=+document.getElementById('moe-e').value, K=+document.getElementById('moe-k').value;
+  const S=S_STEPS[+document.getElementById('moe-s').value];
+  let Ku=+document.getElementById('moe-ku').value;
+  const kuMax=Math.min(E, S*K);
+  if(Ku>kuMax){Ku=kuMax; document.getElementById('moe-ku').value=Ku;}
+  if(Ku<K){Ku=K; document.getElementById('moe-ku').value=Ku;}
+  document.getElementById('moe-ku').max=kuMax;
+  document.getElementById('moe-d-val').textContent=d; document.getElementById('moe-dff-val').textContent=dff;
+  document.getElementById('moe-e-val').textContent=E; document.getElementById('moe-k-val').textContent=K;
+  document.getElementById('moe-s-val').textContent=S; document.getElementById('moe-ku-val').textContent=Ku;
+  const totalFlops = S*d*E*2 + K*S*dff*(6*d+6) + S*d*(2*K-1);
+  const totalIO = (S*d+S*E+d*E)*2 + Ku*d*dff*1.59375 + K*S*(6*d+12*dff) + S*d*(2*K+2)*2;
+  const oi=totalFlops/totalIO, perf=attainable(oi), isMem=oi<RIDGE;
+  document.getElementById('moe-oi').textContent=oi.toFixed(1)+' FLOP/B';
+  const mr=document.getElementById('moe-regime'); mr.textContent=isMem?'Memory bound':'Compute bound'; mr.className='card-value '+(isMem?'mem':'comp');
+  drawRoofline(document.getElementById('moe-canvas'), oi, perf, isMem, 'S='+S+' K='+K+' Ku='+Ku);
+}
+function resetMoE() {
+  document.getElementById('moe-d').value=GPT_OSS.d; document.getElementById('moe-dff').value=GPT_OSS.dff;
+  document.getElementById('moe-e').value=GPT_OSS.E; document.getElementById('moe-k').value=GPT_OSS.K;
+  document.getElementById('moe-s').value=GPT_OSS.sIdx; document.getElementById('moe-ku').value=GPT_OSS.E; updateMoE();
+}
+
+/* ═══════ LM Head ═══════ */
+function updateLM() {
+  const d=+document.getElementById('lm-d').value, V=+document.getElementById('lm-v').value;
+  const S=S_STEPS[+document.getElementById('lm-s').value];
+  document.getElementById('lm-d-val').textContent=d; document.getElementById('lm-v-val').textContent=V;
+  document.getElementById('lm-s-val').textContent=S;
+  // FLOPs: matmul(2·S·d·V) + softmax(S·V·4)
+  const flops = S*d*V*2 + S*V*4;
+  // IO: read x(S·d) + read W(d·V) + write logits(S·V) + read logits(S·V) + write probs(S·V) = (S·d + d·V + 3·S·V) × 2
+  const io = (S*d + d*V + 3*S*V) * 2;
+  const oi=flops/io, perf=attainable(oi), isMem=oi<RIDGE;
+  document.getElementById('lm-oi').textContent=oi.toFixed(1)+' FLOP/B';
+  document.getElementById('lm-perf').textContent=perf.toFixed(1)+' TFLOPS';
+  const r=document.getElementById('lm-regime'); r.textContent=isMem?'Memory bound':'Compute bound'; r.className='card-value '+(isMem?'mem':'comp');
+  drawRoofline(document.getElementById('lm-canvas'), oi, perf, isMem, 'S='+S+' V='+V);
+}
+function resetLM() { document.getElementById('lm-d').value=GPT_OSS.d; document.getElementById('lm-v').value=GPT_OSS.V; document.getElementById('lm-s').value=GPT_OSS.sIdx; updateLM(); }
+
+/* ═══════ Memory Budget ═══════ */
+const HBM_CAP = 80; // GB
+function fmtGB(bytes) { return (bytes/1e9).toFixed(2)+' GB'; }
+function fmtParams(n) { return n>=1e9?(n/1e9).toFixed(2)+'B':n>=1e6?(n/1e6).toFixed(1)+'M':(n/1e3).toFixed(0)+'K'; }
+
+function updateMem() {
+  const d=+document.getElementById('mem-d').value, dff=+document.getElementById('mem-dff').value;
+  const hd=+document.getElementById('mem-hd').value, H=+document.getElementById('mem-h').value;
+  let Hkv=+document.getElementById('mem-hkv').value;
+  if(Hkv>H){Hkv=H; document.getElementById('mem-hkv').value=Hkv;}
+  const E=+document.getElementById('mem-e').value, L=+document.getElementById('mem-l').value;
+  const V=+document.getElementById('mem-v').value, B=+document.getElementById('mem-b').value;
+  const Skv=S_STEPS[+document.getElementById('mem-skv').value];
+  const moeWBpp=+document.getElementById('mem-wfmt').value;
+  const SW=+document.getElementById('mem-sw').value;
+  let Lfull=+document.getElementById('mem-lfull').value;
+  let Lswa=+document.getElementById('mem-lswa').value;
+  const bf16 = 2;
+
+  // Auto-adjust: if Lfull+Lswa != L, clamp Lswa
+  if (Lfull > L) { Lfull = L; document.getElementById('mem-lfull').value = Lfull; }
+  Lswa = L - Lfull; document.getElementById('mem-lswa').value = Lswa;
+
+  document.getElementById('mem-d-val').textContent=d; document.getElementById('mem-dff-val').textContent=dff;
+  document.getElementById('mem-hd-val').textContent=hd; document.getElementById('mem-h-val').textContent=H;
+  document.getElementById('mem-hkv-val').textContent=Hkv; document.getElementById('mem-e-val').textContent=E;
+  document.getElementById('mem-l-val').textContent=L; document.getElementById('mem-v-val').textContent=V;
+  document.getElementById('mem-b-val').textContent=B; document.getElementById('mem-skv-val').textContent=Skv;
+  document.getElementById('mem-sw-val').textContent=SW;
+  document.getElementById('mem-lfull-val').textContent=Lfull;
+  document.getElementById('mem-lswa-val').textContent=Lswa;
+  const lchk = document.getElementById('mem-lcheck');
+  lchk.textContent = Lfull+'+'+Lswa+'='+L+(Lfull+Lswa===L?' ✓':' ✗');
+  lchk.style.color = (Lfull+Lswa===L) ? '#1D9E75' : '#A32D2D';
+
+  // Weights (mixed precision)
+  const attnParams = d * hd * (2*H + 2*Hkv);
+  const ffnParams  = E * 3 * d * dff;
+  const routerParams = d * E;
+  const normParams = 2 * d;
+  const perLayerBytes = attnParams*bf16 + ffnParams*moeWBpp + routerParams*bf16 + normParams*bf16;
+  const perLayerParams = attnParams + ffnParams + routerParams + normParams;
+  const embedParams = V * d, lmHeadParams = V * d, finalNorm = d;
+  const nonLayerBytes = (embedParams + lmHeadParams + finalNorm) * bf16;
+  const totalParams = L * perLayerParams + embedParams + lmHeadParams + finalNorm;
+  const weightBytes = L * perLayerBytes + nonLayerBytes;
+
+  // KV cache — split by full attention vs sliding window
+  const kvPerLayerPerToken = B * hd * Hkv * 2 * 2; // bytes per token per layer (K+V, BF16)
+  const kvFullBytes = Lfull * Skv * kvPerLayerPerToken;
+  const kvSwaBytes  = Lswa * Math.min(Skv, SW) * kvPerLayerPerToken;
+  const kvBytes = kvFullBytes + kvSwaBytes;
+
+  const totalBytes = weightBytes + kvBytes;
+  const remainBytes = HBM_CAP * 1e9 - totalBytes;
+
+  // Max S_KV: solve weightBytes + Lfull*S*c + Lswa*min(S,SW)*c = 80GB
+  // For S > SW: weightBytes + (Lfull*S + Lswa*SW)*c = 80GB → S = (80GB - weightBytes - Lswa*SW*c) / (Lfull*c)
+  const c = kvPerLayerPerToken;
+  let maxSkv;
+  if (Lfull > 0) {
+    const budget = HBM_CAP*1e9 - weightBytes - Lswa*SW*c;
+    maxSkv = Math.floor(budget / (Lfull * c));
+    if (maxSkv < SW) { // all layers see ≤ SW, simpler formula
+      maxSkv = Math.floor((HBM_CAP*1e9 - weightBytes) / (L * c));
+    }
+  } else { // all SWA layers
+    maxSkv = Math.floor((HBM_CAP*1e9 - weightBytes) / (Lswa * c));
+    // but capped at SW per layer, so effectively unlimited beyond SW
+    if (maxSkv >= SW) maxSkv = Infinity;
+  }
+
+  document.getElementById('mem-params').textContent = fmtParams(totalParams);
+  document.getElementById('mem-weights').textContent = fmtGB(weightBytes);
+  document.getElementById('mem-kv-full').textContent = fmtGB(kvFullBytes);
+  document.getElementById('mem-kv-swa').textContent = fmtGB(kvSwaBytes);
+  document.getElementById('mem-total').textContent = fmtGB(totalBytes);
+
+  const remEl = document.getElementById('mem-remain');
+  remEl.textContent = remainBytes >= 0 ? fmtGB(remainBytes) : 'OVERFLOW '+fmtGB(-remainBytes);
+  remEl.className = 'card-value '+(remainBytes>=0?'comp':'mem');
+
+  document.getElementById('mem-maxskv').textContent = maxSkv===Infinity ? '∞ (SWA-only, capped at W='+SW+')' : maxSkv > 0 ? maxSkv.toLocaleString() : 'N/A (weights exceed 80 GB)';
+
+  // Draw stacked bar
+  const canvas = document.getElementById('mem-canvas');
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const dpr = window.devicePixelRatio||1;
+  canvas.width = rect.width*dpr; canvas.height = rect.height*dpr;
+  canvas.style.width = rect.width+'px'; canvas.style.height = rect.height+'px';
+  const ctx = canvas.getContext('2d'); ctx.scale(dpr,dpr);
+  const Wi = rect.width, Ht = rect.height;
+  const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+  ctx.clearRect(0,0,Wi,Ht);
+
+  const pad = {l:60, r:20, t:16, b:24};
+  const bw = Wi-pad.l-pad.r, bh = 36, by = pad.t;
+  const scale = bw / (HBM_CAP * 1e9);
+
+  // Segments: weights | KV full | KV SWA
+  const seg = [
+    { bytes: weightBytes, color: '#534AB7', label: 'Weights' },
+    { bytes: kvFullBytes,  color: '#2E86C1', label: 'KV Full' },
+    { bytes: kvSwaBytes,   color: '#E67E22', label: 'KV SWA' },
+  ];
+  let x = pad.l;
+  seg.forEach(s => {
+    const w = Math.min(s.bytes * scale, pad.l + bw - x);
+    if (w > 0) { ctx.fillStyle = s.color; ctx.fillRect(x, by, w, bh); }
+    s._x = x; s._w = w; x += w;
+  });
+  // Remaining
+  if (x < pad.l + bw) {
+    ctx.fillStyle = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)';
+    ctx.fillRect(x, by, pad.l+bw-x, bh);
+  }
+  if (totalBytes > HBM_CAP*1e9) { ctx.fillStyle='#A32D2D'; ctx.fillRect(pad.l+bw-3,by,3,bh); }
+
+  ctx.strokeStyle = isDark?'rgba(255,255,255,0.15)':'rgba(0,0,0,0.12)'; ctx.lineWidth=1;
+  ctx.strokeRect(pad.l, by, bw, bh);
+
+  // 80GB cap
+  ctx.setLineDash([4,3]); ctx.strokeStyle=isDark?'#F09595':'#A32D2D'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(pad.l+bw,by-4); ctx.lineTo(pad.l+bw,by+bh+4); ctx.stroke(); ctx.setLineDash([]);
+
+  const txt = isDark?'#d3d1c7':'#5f5e5a';
+  ctx.fillStyle=txt; ctx.font='10px system-ui'; ctx.textAlign='right'; ctx.textBaseline='middle';
+  ctx.fillText('80 GB', pad.l-6, by+bh/2);
+
+  // Legend
+  ctx.font='11px system-ui'; ctx.textBaseline='top';
+  const ly = by+bh+8;
+  let lx = pad.l;
+  seg.forEach(s => {
+    ctx.fillStyle=s.color; ctx.fillRect(lx,ly,10,10);
+    ctx.fillStyle=txt; ctx.textAlign='left';
+    ctx.fillText(s.label+' '+fmtGB(s.bytes), lx+14, ly);
+    lx += 170;
+  });
+  const pctUsed = ((totalBytes/(HBM_CAP*1e9))*100).toFixed(1);
+  ctx.textAlign='right'; ctx.fillStyle=totalBytes>HBM_CAP*1e9?'#A32D2D':txt;
+  ctx.fillText(pctUsed+'% of 80 GB', pad.l+bw, ly);
+}
+
+function resetMem() {
+  document.getElementById('mem-d').value=GPT_OSS.d; document.getElementById('mem-dff').value=GPT_OSS.dff;
+  document.getElementById('mem-hd').value=GPT_OSS.hd; document.getElementById('mem-h').value=GPT_OSS.H;
+  document.getElementById('mem-hkv').value=GPT_OSS.Hkv; document.getElementById('mem-e').value=GPT_OSS.E;
+  document.getElementById('mem-l').value=GPT_OSS.L; document.getElementById('mem-v').value=GPT_OSS.V;
+  document.getElementById('mem-b').value=1; document.getElementById('mem-skv').value=GPT_OSS.sIdx;
+  document.getElementById('mem-wfmt').value='0.53125';
+  document.getElementById('mem-sw').value=128; document.getElementById('mem-lfull').value=12;
+  updateMem();
+}
+
+/* ═══════ Flash Attention (Session 2) ═══════ */
+function drawRooflineMulti(canvas, points) {
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
+  canvas.style.width = rect.width + 'px'; canvas.style.height = rect.height + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const W = rect.width, Ht = rect.height;
+  const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const txt = isDark ? '#d3d1c7' : '#5f5e5a', grid = isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)';
+  const roof = isDark ? '#e0dfd8' : '#2c2c2a';
+  ctx.clearRect(0, 0, W, Ht);
+  const pad = { l: 66, r: 22, t: 22, b: 44 }, pw = W-pad.l-pad.r, ph = Ht-pad.t-pad.b;
+  const xMin = -1, xMax = 5, yMin = -1, yMax = 3;
+  const toX = lx => pad.l + (lx-xMin)/(xMax-xMin)*pw;
+  const toY = ly => pad.t + ph - (ly-yMin)/(yMax-yMin)*ph;
+
+  ctx.strokeStyle = grid; ctx.lineWidth = 1;
+  for (let i = Math.ceil(xMin); i <= xMax; i++) { ctx.beginPath(); ctx.moveTo(toX(i),pad.t); ctx.lineTo(toX(i),pad.t+ph); ctx.stroke(); }
+  for (let i = Math.ceil(yMin); i <= yMax; i++) { ctx.beginPath(); ctx.moveTo(pad.l,toY(i)); ctx.lineTo(pad.l+pw,toY(i)); ctx.stroke(); }
+
+  ctx.fillStyle = txt; ctx.font = '11px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (let i = Math.ceil(xMin); i <= xMax; i++) { const v=Math.pow(10,i); ctx.fillText(v>=1?v.toFixed(0):v.toFixed(1), toX(i), pad.t+ph+4); }
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let i = Math.ceil(yMin); i <= yMax; i++) { const v=Math.pow(10,i); ctx.fillText(v>=1?v.toFixed(0):v.toFixed(1), pad.l-8, toY(i)); }
+
+  ctx.fillStyle = txt; ctx.font = '12px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText('Computational Intensity (FLOPs / byte)', pad.l+pw/2, Ht-12);
+  ctx.save(); ctx.translate(14, pad.t+ph/2); ctx.rotate(-Math.PI/2);
+  ctx.textBaseline = 'middle'; ctx.fillText('Attainable Performance (TFLOPS)', 0, 0); ctx.restore();
+
+  ctx.strokeStyle = roof; ctx.lineWidth = 2.5; ctx.lineJoin = 'round'; ctx.beginPath();
+  for (let i = 0; i <= 300; i++) {
+    const lx = xMin+(xMax-xMin)*i/300, o = Math.pow(10,lx), p = attainable(o), ly = Math.log10(p);
+    if (ly<yMin||ly>yMax) continue; i===0?ctx.moveTo(toX(lx),toY(ly)):ctx.lineTo(toX(lx),toY(ly));
+  } ctx.stroke();
+
+  const rlx = Math.log10(RIDGE);
+  ctx.setLineDash([5,4]); ctx.strokeStyle=isDark?'rgba(255,255,255,0.2)':'rgba(0,0,0,0.15)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(toX(rlx),pad.t); ctx.lineTo(toX(rlx),pad.t+ph); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle=isDark?'rgba(255,255,255,0.35)':'rgba(0,0,0,0.3)'; ctx.font='10px system-ui'; ctx.textAlign='left'; ctx.textBaseline='top';
+  ctx.fillText('ridge = '+RIDGE.toFixed(0), toX(rlx)+4, pad.t+4);
+  ctx.font='11px system-ui'; ctx.textBaseline='bottom';
+  ctx.fillStyle=isDark?'rgba(163,45,45,0.45)':'rgba(163,45,45,0.3)'; ctx.textAlign='right';
+  ctx.fillText('Memory bound', toX(rlx)-8, pad.t+ph-6);
+  ctx.fillStyle=isDark?'rgba(29,158,117,0.45)':'rgba(29,158,117,0.3)'; ctx.textAlign='left';
+  ctx.fillText('Compute bound', toX(rlx)+8, pad.t+ph-6);
+  ctx.fillStyle=txt; ctx.font='10px system-ui'; ctx.textAlign='right'; ctx.textBaseline='bottom';
+  ctx.fillText(PEAK+' TFLOPS', pad.l+pw, toY(Math.log10(PEAK))-6);
+
+  /* Draw dashed arrow between the two points */
+  if (points.length === 2) {
+    const coords = points.map(pt => {
+      const cOi = Math.max(Math.pow(10,xMin), Math.min(Math.pow(10,xMax), pt.oi));
+      const cP = Math.max(Math.pow(10,yMin), Math.min(Math.pow(10,yMax), pt.perf));
+      return { x: toX(Math.log10(cOi)), y: toY(Math.log10(cP)) };
+    });
+    ctx.setLineDash([5,4]); ctx.strokeStyle=isDark?'rgba(255,255,255,0.25)':'rgba(0,0,0,0.18)'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(coords[0].x, coords[0].y); ctx.lineTo(coords[1].x, coords[1].y); ctx.stroke();
+    ctx.setLineDash([]);
+    /* Arrowhead at second point */
+    const dx=coords[1].x-coords[0].x, dy=coords[1].y-coords[0].y, len=Math.sqrt(dx*dx+dy*dy);
+    if (len > 20) {
+      const ux=dx/len, uy=dy/len, ax=coords[1].x-ux*10, ay=coords[1].y-uy*10;
+      ctx.fillStyle=isDark?'rgba(255,255,255,0.35)':'rgba(0,0,0,0.25)';
+      ctx.beginPath(); ctx.moveTo(coords[1].x, coords[1].y);
+      ctx.lineTo(ax-uy*5, ay+ux*5); ctx.lineTo(ax+uy*5, ay-ux*5); ctx.closePath(); ctx.fill();
+    }
+  }
+
+  /* Draw each point */
+  points.forEach((pt, idx) => {
+    const cOi = Math.max(Math.pow(10,xMin), Math.min(Math.pow(10,xMax), pt.oi));
+    const cP = Math.max(Math.pow(10,yMin), Math.min(Math.pow(10,yMax), pt.perf));
+    const dx = toX(Math.log10(cOi)), dy = toY(Math.log10(cP));
+    const dotColor = pt.color;
+    const glow = ctx.createRadialGradient(dx,dy,0,dx,dy,20);
+    glow.addColorStop(0, dotColor+'40'); glow.addColorStop(1, dotColor+'00');
+    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(dx,dy,20,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = dotColor; ctx.beginPath(); ctx.arc(dx,dy,6,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(dx,dy,6,0,Math.PI*2); ctx.stroke();
+
+    const above = idx === 0;
+    const ll = dx < pad.l+pw*0.7; ctx.textAlign = ll?'left':'right'; const lx2 = ll?dx+12:dx-12;
+    ctx.fillStyle = dotColor; ctx.font = 'bold 12px system-ui';
+    if (above) {
+      ctx.textBaseline = 'bottom'; ctx.fillText(pt.label+'  CI='+pt.oi.toFixed(1), lx2, dy-14);
+      ctx.font = '11px system-ui'; ctx.fillStyle = txt; ctx.textBaseline = 'bottom';
+      ctx.fillText(pt.perf.toFixed(1)+' TFLOPS ('+((pt.perf/PEAK)*100).toFixed(1)+'%)', lx2, dy-2);
+    } else {
+      ctx.textBaseline = 'top'; ctx.fillText(pt.label+'  CI='+pt.oi.toFixed(1), lx2, dy+4);
+      ctx.font = '11px system-ui'; ctx.fillStyle = txt; ctx.textBaseline = 'top';
+      ctx.fillText(pt.perf.toFixed(1)+' TFLOPS ('+((pt.perf/PEAK)*100).toFixed(1)+'%)', lx2, dy+18);
+    }
+  });
+}
+
+function fmtBytes(b) { return b>=1e12?(b/1e12).toFixed(1)+' TB':b>=1e9?(b/1e9).toFixed(2)+' GB':b>=1e6?(b/1e6).toFixed(1)+' MB':(b/1e3).toFixed(0)+' KB'; }
+
+function updateFlash() {
+  const hd=+document.getElementById('flash-hd').value;
+  const H=+document.getElementById('flash-h').value, S=S_STEPS[+document.getElementById('flash-s').value];
+  document.getElementById('flash-hd-val').textContent=hd;
+  document.getElementById('flash-h-val').textContent=H;
+  document.getElementById('flash-s-val').textContent=S;
+
+  /* FLOPs: attention kernel only (no projections) */
+  const totalFlops = H*S*S*(4*hd+5);
+
+  /* Naive: materializes S×S attention matrix */
+  const naiveTotalIO = H*(4*S*hd + 4*S*S)*2;
+  const naiveOI = totalFlops/naiveTotalIO, naivePerf = attainable(naiveOI), naiveIsMem = naiveOI<RIDGE;
+
+  /* Flash: only Q,K,V,O to HBM */
+  const flashTotalIO = H*(4*S*hd)*2;
+  const flashOI = totalFlops/flashTotalIO, flashPerf = attainable(flashOI), flashIsMem = flashOI<RIDGE;
+
+  document.getElementById('flash-naive-oi').textContent = naiveOI.toFixed(1)+' FLOP/B';
+  const nr=document.getElementById('flash-naive-regime'); nr.textContent=naiveIsMem?'Memory bound':'Compute bound'; nr.className='card-value '+(naiveIsMem?'mem':'comp');
+  document.getElementById('flash-flash-oi').textContent = flashOI.toFixed(1)+' FLOP/B';
+  const fr=document.getElementById('flash-flash-regime'); fr.textContent=flashIsMem?'Memory bound':'Compute bound'; fr.className='card-value '+(flashIsMem?'mem':'comp');
+  document.getElementById('flash-naive-io').textContent = fmtBytes(naiveTotalIO);
+  document.getElementById('flash-flash-io').textContent = fmtBytes(flashTotalIO);
+  document.getElementById('flash-io-ratio').textContent = (naiveTotalIO/flashTotalIO).toFixed(1)+'×';
+
+  drawRooflineMulti(document.getElementById('flash-canvas'), [
+    { oi: naiveOI, perf: naivePerf, isMem: naiveIsMem, label: 'Naive', color: '#A32D2D' },
+    { oi: flashOI, perf: flashPerf, isMem: flashIsMem, label: 'Flash', color: '#534AB7' }
+  ]);
+}
+function resetFlash() {
+  document.getElementById('flash-hd').value=GPT_OSS.hd;
+  document.getElementById('flash-h').value=GPT_OSS.H;
+  document.getElementById('flash-s').value=GPT_OSS.sIdx; updateFlash();
+}
+
+/* ═══════ Wire up ═══════ */
+['rms-d','rms-s'].forEach(id => document.getElementById(id).addEventListener('input', updateRMS));
+['gqa-d','gqa-hd','gqa-h','gqa-hkv','gqa-s'].forEach(id => document.getElementById(id).addEventListener('input', updateGQA));
+['dec-d','dec-hd','dec-h','dec-hkv','dec-skv'].forEach(id => document.getElementById(id).addEventListener('input', updateDec));
+['ffn-d','ffn-dff','ffn-s'].forEach(id => document.getElementById(id).addEventListener('input', updateFFN));
+['moe-d','moe-dff','moe-e','moe-k','moe-s','moe-ku'].forEach(id => document.getElementById(id).addEventListener('input', updateMoE));
+['lm-d','lm-v','lm-s'].forEach(id => document.getElementById(id).addEventListener('input', updateLM));
+['mem-d','mem-dff','mem-hd','mem-h','mem-hkv','mem-e','mem-l','mem-v','mem-b','mem-skv','mem-sw','mem-lfull','mem-lswa'].forEach(id => document.getElementById(id).addEventListener('input', updateMem));
+document.getElementById('mem-wfmt').addEventListener('change', updateMem);
+['flash-hd','flash-h','flash-s'].forEach(id => document.getElementById(id).addEventListener('input', updateFlash));
+window.addEventListener('resize', () => { updateRMS(); updateGQA(); updateDec(); updateFFN(); updateMoE(); updateLM(); updateMem(); updateFlash(); });
+updateRMS(); updateGQA(); updateDec(); updateFFN(); updateMoE(); updateLM(); updateMem(); updateFlash();
+</script>
+</body>
+</html>
